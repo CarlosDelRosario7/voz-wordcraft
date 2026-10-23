@@ -1,0 +1,676 @@
+#!/usr/bin/env bash
+# voz-wordcraft: elige, prueba y cambia la voz que usa WordCraft.
+set -u
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+SCRIPT_DIR=$(dirname "$SELF")
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+cargar_config
+
+estado() {
+    local net tipo id speaker name reproductor edge piper
+    rm -f "$NET_STATE"
+    if hay_internet; then
+        net="sí"
+    else
+        net="no"
+    fi
+    if [ "$MODO" = "offline" ]; then
+        tipo=offline
+        id="$VOZ_OFFLINE"
+        speaker="$VOZ_OFFLINE_SPEAKER"
+    elif [ "$net" = "sí" ]; then
+        tipo=online
+        id="$VOZ_ONLINE"
+        speaker=""
+    else
+        tipo=offline
+        id="$VOZ_OFFLINE"
+        speaker="$VOZ_OFFLINE_SPEAKER"
+    fi
+    if [ "$tipo" = "online" ]; then
+        name=$(nombre_voz "$id")
+    else
+        name=$(nombre_offline "$id" "$speaker")
+    fi
+    if command -v ffplay >/dev/null 2>&1; then
+        reproductor=ffplay
+    elif command -v mpv >/dev/null 2>&1; then
+        reproductor=mpv
+    elif command -v mplayer >/dev/null 2>&1; then
+        reproductor=mplayer
+    elif command -v cvlc >/dev/null 2>&1; then
+        reproductor=cvlc
+    elif command -v paplay >/dev/null 2>&1; then
+        reproductor=paplay
+    elif command -v aplay >/dev/null 2>&1; then
+        reproductor=aplay
+    else
+        reproductor="no encontrado"
+    fi
+    edge="$EDGE_BIN"
+    [ -x "$edge" ] || edge=$(command -v edge-tts 2>/dev/null || true)
+    piper="$PIPER_BIN"
+    [ -x "$piper" ] || piper="no instalado"
+    echo "voz-wordcraft $(version_instalada)"
+    if [ "$MODO" = "online" ]; then
+        echo "Modo: online (preferido)"
+    else
+        echo "Modo: offline (fijo)"
+    fi
+    echo "Internet: $net"
+    echo "Voz efectiva: $name ($tipo)"
+    echo "Voz online: $(nombre_voz "$VOZ_ONLINE") — $VOZ_ONLINE"
+    if modelo_instalado "$VOZ_OFFLINE"; then
+        echo "Voz offline: $(nombre_offline "$VOZ_OFFLINE" "$VOZ_OFFLINE_SPEAKER") — $VOZ_OFFLINE (instalada)"
+    else
+        echo "Voz offline: $(nombre_offline "$VOZ_OFFLINE" "$VOZ_OFFLINE_SPEAKER") — $VOZ_OFFLINE (NO instalada)"
+    fi
+    echo "Edge TTS: ${edge:-no encontrado}"
+    echo "Piper: $piper"
+    echo "Reproductor: $reproductor"
+    echo "Caché: $(du -sh "$CACHE" 2>/dev/null | awk '{print $1}')"
+    if [ "$MODO" = "online" ] && [ "$net" = "no" ]; then
+        echo "Ahora mismo se usará la voz offline hasta que vuelva la conexión."
+    elif [ "$MODO" = "offline" ]; then
+        echo "Para volver a online: voz-wordcraft online"
+    fi
+    echo "Privacidad: online envía el texto a Microsoft; offline es 100% local."
+}
+
+listar() {
+    local name id country gender quality size path speaker mark est
+    echo "Voces ONLINE (Edge TTS)"
+    while IFS='|' read -r name id country gender; do
+        mark=""
+        [ "$id" = "$VOZ_ONLINE" ] && mark="  [actual]"
+        printf '  %-12s %-24s %-15s %s%s\n' "$name" "$id" "$country" "$gender" "$mark"
+    done < <(catalogo_online)
+    echo
+    echo "Voces OFFLINE (Piper / MBROLA)"
+    while IFS='|' read -r name id country gender quality size path speaker; do
+        if modelo_instalado "$id"; then
+            est="instalada"
+        elif [ "$id" = "mb-es3" ]; then
+            est="no instalada (opcional)"
+        else
+            est="no instalada ($size)"
+        fi
+        mark=""
+        if [ "$id" = "$VOZ_OFFLINE" ] && [ "${speaker:-}" = "${VOZ_OFFLINE_SPEAKER:-}" ]; then
+            mark="  [actual]"
+        fi
+        printf '  %-12s %-26s %-15s %-9s %s%s\n' "$name" "$id" "$country" "$gender" "$est" "$mark"
+    done < <(catalogo_offline)
+    echo
+    echo "Online actual: $(nombre_voz "$VOZ_ONLINE") — $VOZ_ONLINE"
+    echo "Offline actual: $(nombre_offline "$VOZ_OFFLINE" "$VOZ_OFFLINE_SPEAKER") — $VOZ_OFFLINE"
+    echo
+    echo "Para probar:  voz-wordcraft probar <voz>"
+    echo "Para elegir:  voz-wordcraft usar <voz>"
+    echo "Para bajar:   voz-wordcraft descargar <voz offline>"
+}
+
+probar() {
+    local input="${1:-}" res tipo id speaker name sample
+    if [ -z "$input" ]; then
+        if [ "$MODO" = "offline" ] || ! hay_internet; then
+            tipo=offline
+            id="$VOZ_OFFLINE"
+            speaker="$VOZ_OFFLINE_SPEAKER"
+        else
+            tipo=online
+            id="$VOZ_ONLINE"
+            speaker=""
+        fi
+    else
+        res=$(resolver_voz "$input") || {
+            echo "No conozco la voz '$input'. Usa: voz-wordcraft listar"
+            return 1
+        }
+        IFS='|' read -r tipo id speaker <<< "$res"
+    fi
+    if ! reproductor_disponible; then
+        echo "No encontré un reproductor de audio. Instala ffmpeg (ffplay) o mpv."
+        return 1
+    fi
+    if [ "$tipo" = "online" ]; then
+        name=$(nombre_voz "$id")
+    else
+        name=$(nombre_offline "$id" "$speaker")
+    fi
+    sample="Hola. Así suena mi voz cuando WordCraft lee un documento."
+    if [ "$tipo" = "online" ]; then
+        if ! hay_internet; then
+            echo "Sin internet: no se puede probar la voz online."
+            return 1
+        fi
+        echo "Probando $name (online)..."
+        if ( VOZ_ONLINE="$id"; generar_online "$sample" 180 && reproducir "$AUDIO_FILE" ); then
+            :
+        else
+            echo "No se pudo generar o reproducir la muestra online."
+            return 1
+        fi
+    else
+        if ! modelo_instalado "$id"; then
+            if [ "$id" = "mb-es3" ]; then
+                echo "MBROLA no está instalada. Ejecuta: ./install.sh --with-mbrola"
+            else
+                echo "La voz $name no está instalada. Ejecuta: voz-wordcraft descargar $name"
+            fi
+            return 1
+        fi
+        echo "Probando $name (offline)..."
+        if ( VOZ_OFFLINE="$id"; VOZ_OFFLINE_SPEAKER="$speaker"; generar_offline "$sample" 180 && reproducir "$AUDIO_FILE" ); then
+            :
+        else
+            echo "No se pudo generar o reproducir la muestra offline."
+            return 1
+        fi
+    fi
+}
+
+usar() {
+    local tipo="" input="" res rtipo rid rspeaker
+    if [ "${1:-}" = "online" ] || [ "${1:-}" = "offline" ]; then
+        tipo="$1"
+        shift
+    fi
+    input="${1:-}"
+    if [ -z "$input" ]; then
+        echo "Uso: voz-wordcraft usar [online|offline] <voz>"
+        return 1
+    fi
+    res=$(resolver_voz "$input") || {
+        echo "No conozco la voz '$input'. Usa: voz-wordcraft listar"
+        return 1
+    }
+    IFS='|' read -r rtipo rid rspeaker <<< "$res"
+    if [ -n "$tipo" ] && [ "$tipo" != "$rtipo" ]; then
+        echo "'$input' es una voz $rtipo, no $tipo."
+        return 1
+    fi
+    if [ "$rtipo" = "online" ]; then
+        VOZ_ONLINE="$rid"
+        guardar_config
+        echo "Voz online cambiada a $(nombre_voz "$rid") ($rid)."
+        echo "Modo actual: $MODO. La voz online se usa cuando el modo es online y hay internet."
+    else
+        VOZ_OFFLINE="$rid"
+        VOZ_OFFLINE_SPEAKER="$rspeaker"
+        guardar_config
+        echo "Voz offline cambiada a $(nombre_offline "$rid" "$rspeaker") ($rid)."
+        if ! modelo_instalado "$rid"; then
+            if [ "$rid" = "mb-es3" ]; then
+                echo "MBROLA aún no está instalada. Ejecuta: ./install.sh --with-mbrola"
+            else
+                echo "Aún no está descargada. Ejecuta: voz-wordcraft descargar $(nombre_offline "$rid" "$rspeaker")"
+            fi
+        fi
+        echo "Modo actual: $MODO. La voz offline se usa en modo offline o cuando no hay internet."
+    fi
+}
+
+modo_online() {
+    MODO=online
+    guardar_config
+    rm -f "$NET_STATE"
+    if hay_internet; then
+        printf 'online\n' > "$ESTADO_EFECTIVO"
+        echo "Modo online activado. Internet: sí."
+        echo "Voz online: $(nombre_voz "$VOZ_ONLINE") ($VOZ_ONLINE)."
+        echo "Si se cae la conexión, se usará $(nombre_offline "$VOZ_OFFLINE" "$VOZ_OFFLINE_SPEAKER") y se volverá a online automáticamente."
+    else
+        printf 'offline\n' > "$ESTADO_EFECTIVO"
+        echo "Modo online activado, pero ahora no hay internet."
+        echo "Se usará $(nombre_offline "$VOZ_OFFLINE" "$VOZ_OFFLINE_SPEAKER") hasta que vuelva la conexión; luego se cambiará a $(nombre_voz "$VOZ_ONLINE") automáticamente."
+    fi
+    if ! modelo_instalado "$VOZ_OFFLINE"; then
+        echo "Aviso: la voz offline no está instalada. Ejecuta: voz-wordcraft descargar $(nombre_offline "$VOZ_OFFLINE" "$VOZ_OFFLINE_SPEAKER")"
+    fi
+}
+
+modo_offline() {
+    MODO=offline
+    guardar_config
+    printf 'offline\n' > "$ESTADO_EFECTIVO"
+    echo "Modo offline fijo activado. Se usará $(nombre_offline "$VOZ_OFFLINE" "$VOZ_OFFLINE_SPEAKER") ($VOZ_OFFLINE)."
+    echo "No se volverá a online hasta que ejecutes: voz-wordcraft online"
+    if ! modelo_instalado "$VOZ_OFFLINE"; then
+        echo "Aviso: la voz offline no está instalada. Ejecuta: voz-wordcraft descargar $(nombre_offline "$VOZ_OFFLINE" "$VOZ_OFFLINE_SPEAKER")"
+    fi
+}
+
+descargar() {
+    local input="${1:-}" res rtipo rid rspeaker name path base onnx json tmp_onnx tmp_json md5_esperado md5_json_esperado md5_real
+    if [ -z "$input" ]; then
+        echo "Uso: voz-wordcraft descargar <voz offline>"
+        return 1
+    fi
+    res=$(resolver_voz "$input") || {
+        echo "No conozco la voz '$input'. Usa: voz-wordcraft listar"
+        return 1
+    }
+    IFS='|' read -r rtipo rid rspeaker <<< "$res"
+    if [ "$rtipo" != "offline" ]; then
+        echo "'$input' es una voz online; las voces online no se descargan."
+        return 1
+    fi
+    name=$(nombre_offline "$rid" "$rspeaker")
+    if modelo_instalado "$rid"; then
+        echo "La voz $name ya está instalada."
+        return 0
+    fi
+    if [ "$rid" = "mb-es3" ]; then
+        echo "MBROLA es3 no está instalada en $MBROLA_DIR."
+        echo "Vuelve a ejecutar el instalador: ./install.sh --with-mbrola"
+        return 1
+    fi
+    path=$(catalogo_offline | awk -F'|' -v id="$rid" '$2==id {print $7; exit}')
+    if [ -z "$path" ]; then
+        echo "No encontré la ruta de descarga de $name."
+        return 1
+    fi
+    if ! command -v md5sum >/dev/null 2>&1; then
+        echo "Falta md5sum; no puedo verificar la descarga."
+        return 1
+    fi
+    md5_esperado=$(md5_modelo "$rid") || {
+        echo "No tengo una suma de verificación para $rid."
+        return 1
+    }
+    md5_json_esperado=$(md5_config_modelo "$rid") || {
+        echo "No tengo una suma de verificación para la configuración de $rid."
+        return 1
+    }
+    mkdir -p "$VOCES_DIR"
+    onnx="$VOCES_DIR/$rid.onnx"
+    json="$onnx.json"
+    tmp_onnx="$VOCES_DIR/.$rid.onnx.part.$$"
+    tmp_json="$VOCES_DIR/.$rid.onnx.json.part.$$"
+    base="https://huggingface.co/rhasspy/piper-voices/resolve/main/$path"
+    echo "Descargando $name..."
+    if ! curl -fL --retry 3 --connect-timeout 15 --progress-bar -o "$tmp_onnx" "$base.onnx"; then
+        rm -f "$tmp_onnx"
+        echo "Error al descargar el modelo."
+        return 1
+    fi
+    md5_real=$(md5sum "$tmp_onnx" | awk '{print $1}')
+    if [ "$md5_real" != "$md5_esperado" ]; then
+        rm -f "$tmp_onnx"
+        echo "El modelo descargado no coincide con la suma de verificación."
+        return 1
+    fi
+    if ! curl -fL --retry 3 --connect-timeout 15 --progress-bar -o "$tmp_json" "$base.onnx.json"; then
+        rm -f "$tmp_onnx" "$tmp_json"
+        echo "Error al descargar la configuración."
+        return 1
+    fi
+    md5_real=$(md5sum "$tmp_json" | awk '{print $1}')
+    if [ "$md5_real" != "$md5_json_esperado" ]; then
+        rm -f "$tmp_onnx" "$tmp_json"
+        echo "La configuración descargada no coincide con la suma de verificación."
+        return 1
+    fi
+    mv "$tmp_onnx" "$onnx"
+    mv "$tmp_json" "$json"
+    echo "Voz $name instalada."
+    echo "Para usarla: voz-wordcraft usar $name"
+}
+
+limpiar() {
+    local before after
+    before=$(du -sh "$CACHE" 2>/dev/null | awk '{print $1}')
+    rm -rf "$CACHE/online" "$CACHE/offline"
+    after=$(du -sh "$CACHE" 2>/dev/null | awk '{print $1}')
+    echo "Caché vaciada (antes: ${before:-0}, ahora: ${after:-0})."
+}
+
+diagnostico() {
+    local edge real player ok=1
+    echo "voz-wordcraft $(version_instalada)"
+    echo "BASE: $BASE"
+    echo "Config: $CONF"
+    echo "Caché: $CACHE"
+    echo
+    if [ -w "$BASE" ]; then echo "Datos: escritura OK"; else echo "Datos: SIN permiso de escritura"; ok=0; fi
+    if [ -w "$CONF_DIR" ]; then echo "Config: escritura OK"; else echo "Config: SIN permiso de escritura"; ok=0; fi
+    if command -v curl >/dev/null 2>&1; then echo "curl: $(command -v curl)"; else echo "curl: FALTA"; ok=0; fi
+    if command -v python3 >/dev/null 2>&1; then echo "python3: $(python3 --version 2>&1)"; else echo "python3: FALTA"; ok=0; fi
+    edge="$EDGE_BIN"
+    [ -x "$edge" ] || edge=$(command -v edge-tts 2>/dev/null || true)
+    echo "edge-tts: ${edge:-no encontrado}"
+    if [ -x "$PIPER_BIN" ]; then echo "Piper: $PIPER_BIN"; else echo "Piper: no instalado"; fi
+    if [ -r "$REAL_ESPEAK_FILE" ]; then
+        real=$(tr -d '\r\n' < "$REAL_ESPEAK_FILE" 2>/dev/null || true)
+        echo "espeak-ng real: ${real:-no encontrado}"
+    else
+        echo "espeak-ng real: no registrado"
+    fi
+    if modelo_instalado mb-es3; then echo "MBROLA es3: instalada"; else echo "MBROLA es3: no instalada (opcional)"; fi
+    if reproductor_disponible; then
+        if command -v ffplay >/dev/null 2>&1; then player=ffplay
+        elif command -v mpv >/dev/null 2>&1; then player=mpv
+        elif command -v mplayer >/dev/null 2>&1; then player=mplayer
+        elif command -v cvlc >/dev/null 2>&1; then player=cvlc
+        elif command -v paplay >/dev/null 2>&1; then player=paplay
+        else player=aplay
+        fi
+        echo "Reproductor: $player"
+    else
+        echo "Reproductor: FALTA (instala ffmpeg o mpv)"; ok=0
+    fi
+    if command -v notify-send >/dev/null 2>&1; then echo "Notificaciones: notify-send"; else echo "Notificaciones: no disponibles (opcional)"; fi
+    if command -v whiptail >/dev/null 2>&1; then echo "Menú gráfico: whiptail"; else echo "Menú gráfico: no disponible (se usará texto)"; fi
+    if hay_internet; then echo "Internet: sí"; else echo "Internet: no"; fi
+    if [ -x "$EDGE_BIN" ] || command -v edge-tts >/dev/null 2>&1; then
+        echo "Online: listo"
+    else
+        echo "Online: falta edge-tts"; ok=0
+    fi
+    if modelo_instalado "$VOZ_OFFLINE"; then
+        echo "Voz offline configurada: $(nombre_offline "$VOZ_OFFLINE" "$VOZ_OFFLINE_SPEAKER") (lista)"
+    else
+        echo "Voz offline configurada: $(nombre_offline "$VOZ_OFFLINE" "$VOZ_OFFLINE_SPEAKER") (NO instalada)"
+        ok=0
+    fi
+    echo
+    if [ "$ok" -eq 1 ]; then
+        echo "Diagnóstico: todo lo esencial está listo."
+        return 0
+    fi
+    echo "Diagnóstico: hay puntos pendientes (ver arriba)."
+    return 1
+}
+
+ayuda() {
+    cat <<'EOF'
+WordCraft — Voz
+
+Uso:
+  voz-wordcraft                     Menú interactivo
+  voz-wordcraft estado              Ver modo, internet, voces y caché
+  voz-wordcraft listar              Listar voces online y offline
+  voz-wordcraft probar [voz]        Escuchar una muestra
+  voz-wordcraft usar [online|offline] <voz>
+                                    Cambiar la voz online u offline
+  voz-wordcraft online              Activar modo online (con caída automática a offline)
+  voz-wordcraft offline             Activar modo offline fijo
+  voz-wordcraft descargar <voz>     Descargar una voz offline de Piper
+  voz-wordcraft limpiar             Vaciar la caché
+  voz-wordcraft diagnostico         Comprobar dependencias y estado
+  voz-wordcraft version             Ver la versión instalada
+  voz-wordcraft ayuda               Esta ayuda
+
+Ejemplos:
+  voz-wordcraft probar Dalia
+  voz-wordcraft probar SharvardF
+  voz-wordcraft usar Dalia
+  voz-wordcraft usar SharvardF
+  voz-wordcraft usar Daniela
+  voz-wordcraft usar MBROLA
+  voz-wordcraft online
+  voz-wordcraft offline
+  voz-wordcraft descargar Daniela
+
+Modos:
+  online   Usa Dalia. Si no hay internet, usa la voz offline y avisa.
+           Cuando vuelve la conexión, regresa a Dalia automáticamente.
+  offline  Usa siempre la voz offline, aunque haya internet, hasta que
+           ejecutes "voz-wordcraft online".
+
+Voces offline:
+  SharvardF  Femenina, acento de España, calidad media. Es la opción por
+             defecto: bastante natural y rápida en CPUs modestas.
+  Daniela    Femenina, acento argentino, calidad alta, pero lenta en CPUs
+             modestas (puede tardar 15-40 s por frase).
+  MBROLA     Femenina, acento de España, robótica, pero casi instantánea.
+             Es opcional: se instala con ./install.sh --with-mbrola.
+
+Privacidad:
+  online   El texto se envía a Microsoft para generar la voz.
+  offline  Todo se genera en tu equipo con Piper o MBROLA.
+EOF
+}
+
+menu_probar() {
+    local args=() sel name id country gender quality size path speaker est
+    while IFS='|' read -r name id country gender; do
+        args+=("$name" "$name — online — $country")
+    done < <(catalogo_online)
+    while IFS='|' read -r name id country gender quality size path speaker; do
+        if modelo_instalado "$id"; then
+            est="offline"
+        elif [ "$id" = "mb-es3" ]; then
+            est="offline, opcional"
+        else
+            est="offline, no instalada"
+        fi
+        args+=("$name" "$name — $est — $country")
+    done < <(catalogo_offline)
+    sel=$(whiptail --title "Probar voz" --menu "Elige una voz" 24 78 14 "${args[@]}" 3>&1 1>&2 2>&3) || return
+    clear
+    ( probar "$sel" )
+    echo
+    read -rp "Pulsa Enter para volver al menú..." _
+}
+
+menu_elegir_online() {
+    local args=() sel name id country gender
+    while IFS='|' read -r name id country gender; do
+        args+=("$id" "$name — $country — $gender")
+    done < <(catalogo_online)
+    sel=$(whiptail --title "Voz online" --menu "Elige la voz online" 22 78 12 "${args[@]}" 3>&1 1>&2 2>&3) || return
+    VOZ_ONLINE="$sel"
+    guardar_config
+    if whiptail --yesno "¿Activar el modo online ahora? Si no hay internet, se usará la voz offline automáticamente." 10 70; then
+        MODO=online
+        guardar_config
+        rm -f "$NET_STATE"
+        if hay_internet; then
+            printf 'online\n' > "$ESTADO_EFECTIVO"
+        else
+            printf 'offline\n' > "$ESTADO_EFECTIVO"
+        fi
+    fi
+    clear
+    echo "Voz online: $(nombre_voz "$VOZ_ONLINE") — $VOZ_ONLINE"
+    echo "Modo: $MODO"
+    echo
+    read -rp "Pulsa Enter para volver al menú..." _
+}
+
+menu_elegir_offline() {
+    local args=() sel name id country gender quality size path speaker est res rtipo rid rspeaker
+    while IFS='|' read -r name id country gender quality size path speaker; do
+        if modelo_instalado "$id"; then
+            est="instalada"
+        elif [ "$id" = "mb-es3" ]; then
+            est="opcional, no instalada"
+        else
+            est="no instalada, $size"
+        fi
+        args+=("$name" "$name — $country — $gender — $est")
+    done < <(catalogo_offline)
+    sel=$(whiptail --title "Voz offline" --menu "Elige la voz offline" 22 78 12 "${args[@]}" 3>&1 1>&2 2>&3) || return
+    res=$(resolver_voz "$sel") || return
+    IFS='|' read -r rtipo rid rspeaker <<< "$res"
+    if ! modelo_instalado "$rid"; then
+        if [ "$rid" = "mb-es3" ]; then
+            whiptail --msgbox "MBROLA es3 es opcional. Instálala con: ./install.sh --with-mbrola" 10 70
+            return
+        fi
+        local tam
+        tam=$(catalogo_offline | awk -F'|' -v id="$rid" '$2==id {print $6; exit}')
+        if whiptail --yesno "La voz $sel no está descargada. ¿Descargarla ahora? ($tam)" 10 70; then
+            clear
+            descargar "$sel"
+            echo
+            read -rp "Pulsa Enter para continuar..." _
+        else
+            return
+        fi
+    fi
+    VOZ_OFFLINE="$rid"
+    VOZ_OFFLINE_SPEAKER="$rspeaker"
+    guardar_config
+    if whiptail --yesno "¿Activar el modo offline fijo ahora? No volverá a online hasta que lo pidas." 10 70; then
+        MODO=offline
+        guardar_config
+        printf 'offline\n' > "$ESTADO_EFECTIVO"
+    fi
+    clear
+    echo "Voz offline: $(nombre_offline "$VOZ_OFFLINE" "$VOZ_OFFLINE_SPEAKER") — $VOZ_OFFLINE"
+    echo "Modo: $MODO"
+    echo
+    read -rp "Pulsa Enter para volver al menú..." _
+}
+
+menu_descargar() {
+    local args=() sel name id country gender quality size path speaker est
+    while IFS='|' read -r name id country gender quality size path speaker; do
+        if modelo_instalado "$id"; then
+            est="instalada"
+        elif [ "$id" = "mb-es3" ]; then
+            est="opcional"
+        else
+            est="$size"
+        fi
+        args+=("$name" "$name — $country — $est")
+    done < <(catalogo_offline)
+    sel=$(whiptail --title "Descargar voz offline" --menu "Elige una voz" 22 78 12 "${args[@]}" 3>&1 1>&2 2>&3) || return
+    clear
+    descargar "$sel"
+    echo
+    read -rp "Pulsa Enter para volver al menú..." _
+}
+
+menu_texto() {
+    local op v
+    while true; do
+        cargar_config
+        echo
+        echo "WordCraft — Voz"
+        echo "Modo: $MODO | Online: $(nombre_voz "$VOZ_ONLINE") | Offline: $(nombre_offline "$VOZ_OFFLINE" "$VOZ_OFFLINE_SPEAKER")"
+        echo "1) Ver estado"
+        echo "2) Listar voces"
+        echo "3) Probar una voz"
+        echo "4) Elegir voz online"
+        echo "5) Elegir voz offline"
+        echo "6) Activar modo online"
+        echo "7) Activar modo offline"
+        echo "8) Descargar voz offline"
+        echo "9) Limpiar caché"
+        echo "10) Diagnóstico"
+        echo "0) Salir"
+        read -rp "Elige una opción: " op
+        case "$op" in
+            1) estado ;;
+            2) listar ;;
+            3) read -rp "Voz a probar: " v; ( probar "$v" ) ;;
+            4) read -rp "Voz online: " v; usar online "$v" ;;
+            5) read -rp "Voz offline: " v; usar offline "$v" ;;
+            6) modo_online ;;
+            7) modo_offline ;;
+            8) read -rp "Voz offline a descargar: " v; descargar "$v" ;;
+            9) limpiar ;;
+            10) diagnostico ;;
+            0) break ;;
+            *) echo "Opción no válida." ;;
+        esac
+    done
+}
+
+menu() {
+    local op
+    cargar_config
+    if ! command -v whiptail >/dev/null 2>&1 || [ ! -t 0 ] || [ ! -t 1 ]; then
+        menu_texto
+        return
+    fi
+    while true; do
+        op=$(whiptail --title "WordCraft — Voz" --menu "Modo: $MODO | Online: $(nombre_voz "$VOZ_ONLINE") | Offline: $(nombre_offline "$VOZ_OFFLINE" "$VOZ_OFFLINE_SPEAKER")" 24 78 13 \
+            1 "Ver estado" \
+            2 "Listar voces" \
+            3 "Probar una voz" \
+            4 "Elegir voz online" \
+            5 "Elegir voz offline" \
+            6 "Activar modo online" \
+            7 "Activar modo offline" \
+            8 "Descargar voz offline" \
+            9 "Limpiar caché" \
+            10 "Diagnóstico" \
+            0 "Salir" \
+            3>&1 1>&2 2>&3) || break
+        case "$op" in
+            1) clear; estado; echo; read -rp "Pulsa Enter para volver al menú..." _ ;;
+            2) clear; listar; echo; read -rp "Pulsa Enter para volver al menú..." _ ;;
+            3) menu_probar ;;
+            4) menu_elegir_online ;;
+            5) menu_elegir_offline ;;
+            6) clear; modo_online; echo; read -rp "Pulsa Enter para volver al menú..." _ ;;
+            7) clear; modo_offline; echo; read -rp "Pulsa Enter para volver al menú..." _ ;;
+            8) menu_descargar ;;
+            9)
+                if whiptail --yesno "¿Vaciar la caché de frases?" 8 60; then
+                    clear
+                    limpiar
+                    echo
+                    read -rp "Pulsa Enter para volver al menú..." _
+                fi
+                ;;
+            10) clear; diagnostico; echo; read -rp "Pulsa Enter para volver al menú..." _ ;;
+            0) break ;;
+        esac
+    done
+}
+
+case "${1:-}" in
+    "")
+        menu
+        ;;
+    estado|status)
+        estado
+        ;;
+    listar|list|voices)
+        listar
+        ;;
+    probar|test)
+        shift
+        probar "$@"
+        ;;
+    usar|use)
+        shift
+        usar "$@"
+        ;;
+    online)
+        modo_online
+        ;;
+    offline)
+        modo_offline
+        ;;
+    descargar|download)
+        shift
+        descargar "$@"
+        ;;
+    limpiar|clean)
+        limpiar
+        ;;
+    diagnostico|doctor|check)
+        diagnostico
+        ;;
+    version|--version|-V)
+        echo "voz-wordcraft $(version_instalada)"
+        ;;
+    ayuda|help|-h|--help)
+        ayuda
+        ;;
+    *)
+        echo "Comando no reconocido: ${1:-}"
+        echo
+        ayuda
+        exit 1
+        ;;
+esac

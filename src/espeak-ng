@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Adaptador que WordCraft llama como si fuera espeak-ng.
+# WordCraft envía: espeak-ng -s <palabras_por_minuto> [-v <idioma>] --stdin
+# y escribe la frase por la entrada estándar.
+#
+# Si se llama sin --stdin (por ejemplo, desde otra aplicación), se reenvía al
+# espeak-ng real para no romper el resto del sistema.
+set -u
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}")
+SCRIPT_DIR=$(dirname "$SELF")
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+cargar_config
+
+argumentos_originales=("$@")
+
+real_espeak() {
+    local candidato
+    if [ -r "$REAL_ESPEAK_FILE" ]; then
+        candidato=$(tr -d '\r\n' < "$REAL_ESPEAK_FILE" 2>/dev/null || true)
+        if [ -n "$candidato" ] && [ -x "$candidato" ]; then
+            exec "$candidato" "$@"
+        fi
+    fi
+    for candidato in /usr/bin/espeak-ng /usr/local/bin/espeak-ng /bin/espeak-ng; do
+        if [ -x "$candidato" ] && [ "$(readlink -f "$candidato")" != "$SELF" ]; then
+            exec "$candidato" "$@"
+        fi
+    done
+    printf 'voz-wordcraft: no se encontró un espeak-ng real para reenviar la llamada.\n' >&2
+    exit 127
+}
+
+stdin_mode=0
+wpm=180
+lang=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -s)
+            wpm="${2:-180}"
+            shift 2
+            ;;
+        -v)
+            lang="${2:-}"
+            shift 2
+            ;;
+        --stdin)
+            stdin_mode=1
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+if [ "$stdin_mode" -eq 0 ]; then
+    real_espeak "${argumentos_originales[@]}"
+fi
+
+text=$(cat)
+[ -n "$text" ] || exit 0
+
+case "$wpm" in ''|*[!0-9]*) wpm=180 ;; esac
+[ "$wpm" -lt 60 ] && wpm=60
+[ "$wpm" -gt 600 ] && wpm=600
+
+hablar_offline() {
+    local motivo="$1"
+    registrar_estado offline "$motivo"
+    if generar_offline "$text" "$wpm"; then
+        reproducir "$AUDIO_FILE"
+    fi
+    # Si la voz offline configurada falla o tarda demasiado, usar MBROLA es3,
+    # que es femenina y prácticamente instantánea en CPUs modestas.
+    if [ "$VOZ_OFFLINE" != "mb-es3" ] && modelo_instalado mb-es3 && generar_mbrola "$text" "$wpm"; then
+        avisar "La voz offline configurada no está disponible o tardó demasiado. Usando MBROLA es3."
+        reproducir "$AUDIO_FILE"
+    fi
+}
+
+if [ "$MODO" = "offline" ]; then
+    hablar_offline manual
+else
+    if hay_internet; then
+        if generar_online "$text" "$wpm"; then
+            registrar_estado online
+            if reproducir "$AUDIO_FILE"; then
+                exit 0
+            fi
+            log "FALLO_REPRODUCCION online len=${#text}"
+            hablar_offline reproduccion
+        else
+            marcar_servicio_caido
+            hablar_offline servicio
+        fi
+    else
+        hablar_offline sin_internet
+    fi
+fi
+
+# Último recurso: la voz femenina del sistema, para no dejar la lectura en silencio.
+log "FALLBACK spd-say lang=${lang:-es} len=${#text}"
+if command -v spd-say >/dev/null 2>&1; then
+    spd-say -w -l "${lang:-es}" -t female1 "$text" >/dev/null 2>&1 || true
+fi
+exit 0

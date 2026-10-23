@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Comprobar sintaxis
+        run: make check
+
+      - name: Ejecutar pruebas
+        run: ./tests/run.sh
+
+      - name: ShellCheck (errores)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck -S error install.sh uninstall.sh src/lib.sh src/espeak-ng src/voz-wordcraft tests/run.sh

@@ -1,0 +1,22 @@
+# Configuración de voz-wordcraft para WordCraft
+# Este archivo se copia a ~/.config/voz-wordcraft/config la primera vez.
+# Puedes editarlo a mano o usar: voz-wordcraft usar <voz>
+
+# Modo: online (Edge; si no hay internet pasa a offline) | offline (siempre local)
+MODO=online
+
+# Voz online (Edge TTS). Ejemplos: es-MX-DaliaNeural, es-ES-ElviraNeural
+VOZ_ONLINE=es-MX-DaliaNeural
+
+# Voz offline (Piper o MBROLA). Ejemplos: es_ES-sharvard-medium, es_AR-daniela-high, mb-es3
+# Sharvard F es la voz por defecto: femenina, española y rápida en CPUs modestas.
+VOZ_OFFLINE=es_ES-sharvard-medium
+# Algunas voces Piper tienen varias personas. Sharvard: 1 = femenina, 0 = masculina.
+VOZ_OFFLINE_SPEAKER=1
+
+# Segundos máximos que se espera a la voz offline antes de usar el respaldo rápido
+# (MBROLA, si está instalada). Daniela puede necesitar 60 s o más en CPUs lentas.
+TIEMPO_MAX_OFFLINE=60
+
+# Avisos de escritorio: si | no
+AVISOS=si

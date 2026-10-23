@@ -1,0 +1,8 @@
+# Descargas y artefactos locales
+*.part
+*.tmp
+dist/
+build/
+__pycache__/
+*.py[cod]
+.DS_Store
